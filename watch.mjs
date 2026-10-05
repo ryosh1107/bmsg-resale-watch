@@ -24,11 +24,12 @@ const saveState = s => {
   fs.writeFileSync(STATE, JSON.stringify(s));
 };
 
+// 公式アカウントの友だち全員に送る（broadcast）
 async function pushLine(text) {
-  const r = await fetch('https://api.line.me/v2/bot/message/push', {
+  const r = await fetch('https://api.line.me/v2/bot/message/broadcast', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + TOKEN },
-    body: JSON.stringify({ to: USER, messages: [{ type: 'text', text }] }),
+    body: JSON.stringify({ messages: [{ type: 'text', text }] }),
   });
   if (!r.ok) console.error('LINE送信失敗', r.status, await r.text());
 }
