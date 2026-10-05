@@ -1,176 +1,54 @@
-/**
- * AnyPASS リセール監視（BMSG FES’26 専用）→ LINE通知  / Google Apps Script
- *
- * 判定ロジック:
- *   サイトの絞り込み検索（アーティスト=BMSG FES, ツアー=BMSG FES’26）をPOSTで実行し、
- *   返ってきた出品カードを1件ずつ解析。
- *   「タイトルが BMSG FES’26」かつ「購入手続き中ではない」かつ「未通知の出品ID」だけ通知。
- *
- * 使い方:
- *   1. CONFIG に LINE のトークンとユーザーIDを入れる
- *   2. testNotify() → LINEに届くか確認
- *   3. testCheck()  → ログに出品一覧が出るか確認（購入手続き中のものも表示）
- *   4. setupTrigger() を1回実行 → 5分おきに check() が動く
- */
+name: BMSG resale watch
 
-const CONFIG = {
-  LINE_TOKEN: 'ここにチャネルアクセストークン（長期）',
-  LINE_USER_ID: 'ここにあなたのユーザーID（Uから始まる）',
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      test:
+        description: 'テスト通知を送る'
+        type: boolean
+        default: true
 
-  // サイトの絞り込み値（2026/10/05 時点でページから確認済み）
-  SEARCH_ARTIST: 'BMSG FES',
-  SEARCH_TOUR: '725',          // BMSG FES’26
-  // 日程を絞る場合: '1003610'=10/10, '1003611'=10/11, '1003612'=10/12（空なら全日程）
-  SEARCH_EVENT: '',
+concurrency:
+  group: resale-watch
+  cancel-in-progress: false
 
-  // この文字列を公演名に含むものだけ対象（念のための二重チェック）
-  TITLE_MUST_INCLUDE: 'BMSG FES',
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
 
-  // 「購入手続き中」の出品も通知するか（手続きがキャンセルされて戻ることがある）
-  NOTIFY_PURCHASING: false,
-};
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
-const BASE = 'https://store.anypass.jp';
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Safari/537.36';
+      - name: 通知済みの記録を復元
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: state-
 
-function check() {
-  let items;
-  try {
-    items = fetchItems_();
-  } catch (e) {
-    notifyErrorOnce_(String(e && e.message || e));
-    return;
-  }
-  const props = PropertiesService.getScriptProperties();
-  props.deleteProperty('lastError');
+      - name: Playwright を入れる（ブラウザ本体はプリインストールのChromeを使う）
+        run: npm install --no-save --no-audit --no-fund playwright
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
 
-  const notified = JSON.parse(props.getProperty('notified') || '{}');
-  const targets = items.filter(it =>
-    it.title.indexOf(CONFIG.TITLE_MUST_INCLUDE) !== -1 &&
-    (CONFIG.NOTIFY_PURCHASING || !it.purchasing) &&
-    !notified[it.id]);
+      - name: リセールをチェック
+        run: node watch.mjs
+        env:
+          LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          TEST_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.test }}
+          SEARCH_EVENT: ''
+          NOTIFY_PURCHASING: 'false'
 
-  if (targets.length) {
-    const lines = targets.slice(0, 5).map(it =>
-      `■ ${it.date}\n${it.seat} / ${it.price}${it.label ? '\n' + it.label : ''}${it.purchasing ? '\n(購入手続き中)' : ''}\n${it.url}`);
-    pushLine_(`🎫 BMSG FESリセール出品 ${targets.length}件！\n\n` + lines.join('\n\n'));
-    const now = Date.now();
-    targets.forEach(it => notified[it.id] = now);
-  }
-
-  // 3日以上前の記録は掃除（容量対策）
-  const limit = Date.now() - 3 * 24 * 3600 * 1000;
-  Object.keys(notified).forEach(k => { if (notified[k] < limit) delete notified[k]; });
-  props.setProperty('notified', JSON.stringify(notified));
-
-  console.log(`出品${items.length}件 / うち購入可能${items.filter(i => !i.purchasing).length}件 / 今回通知${targets.length}件`);
-}
-
-/** サイトの絞り込み検索を実行して出品一覧を返す */
-function fetchItems_() {
-  // 1) GETでセッションCookieとCSRFトークンを取得
-  const r1 = UrlFetchApp.fetch(BASE + '/resale-list', {
-    muteHttpExceptions: true, headers: { 'User-Agent': UA },
-  });
-  if (r1.getResponseCode() !== 200) throw new Error('一覧ページ取得失敗 HTTP ' + r1.getResponseCode());
-  const html1 = r1.getContentText('UTF-8');
-  const m = html1.match(/name="_token"\s+value="([^"]+)"/) || html1.match(/value="([^"]+)"\s+name="_token"/);
-  if (!m) throw new Error('CSRFトークンが見つからない（ページ構造が変わった可能性）');
-  const cookie = getCookies_(r1);
-
-  // 2) 絞り込み条件をPOST
-  const r2 = UrlFetchApp.fetch(BASE + '/resale-list', {
-    method: 'post',
-    muteHttpExceptions: true,
-    followRedirects: false,
-    headers: { 'User-Agent': UA, Cookie: cookie, Referer: BASE + '/resale-list' },
-    payload: {
-      _token: m[1], mode: 'pc', free_word: '',
-      search_artist: CONFIG.SEARCH_ARTIST,
-      search_event: CONFIG.SEARCH_EVENT,
-      search_tour: CONFIG.SEARCH_TOUR,
-      ticket_count: '', price_min: '', price_max: '',
-    },
-  });
-  const code = r2.getResponseCode();
-  if (code !== 200) throw new Error('検索POST失敗 HTTP ' + code);
-  const html = r2.getContentText('UTF-8');
-
-  const items = parseItems_(html);
-  // 絞り込みが効いていない（他アーティストが混ざっている）場合は中断して知らせる
-  if (items.some(it => it.title.indexOf(CONFIG.TITLE_MUST_INCLUDE) === -1)) {
-    throw new Error('絞り込みが効いていない可能性（BMSG以外の出品が混在）');
-  }
-  return items;
-}
-
-function parseItems_(html) {
-  const parts = html.split(/<a[^>]+class="item resale-list-item"/).slice(1);
-  const strip = s => (s || '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ')
-    .replace(/&#0?39;/g, "'").replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
-  const pick = (block, re) => { const x = block.match(re); return x ? strip(x[1]) : ''; };
-
-  return parts.map(p => {
-    const block = p.split('</a>')[0];
-    const href = (p.match(/href="([^"]+)"/) || [])[1] || '';
-    const id = (href.match(/\/resale\/(\d+)/) || [])[1] || href;
-    const text = strip(block);
-    return {
-      id: id,
-      url: href.startsWith('http') ? href : BASE + href.replace(/&amp;/g, '&'),
-      purchasing: /購入手続き中/.test(block),
-      label: pick(block, /class="fc-label-label">([\s\S]*?)<\/span>/),
-      title: pick(block, /class="title">([\s\S]*?)<\/p>/),
-      date: pick(block, /class="date">([\s\S]*?)<\/p>/),
-      seat: ((m => m ? `${m[1]} ×${m[2]}枚` : '')(text.match(/(\S+)\s*×\s*(\d+)\s*枚/))),
-      price: ((m => m ? `${m[1]}/1枚` : '')(text.match(/(¥[\d,]+)\s*\/\s*1\s*枚/))),
-    };
-  });
-}
-
-function getCookies_(res) {
-  const h = res.getAllHeaders()['Set-Cookie'];
-  const arr = Array.isArray(h) ? h : (h ? [h] : []);
-  return arr.map(c => c.split(';')[0]).join('; ');
-}
-
-function pushLine_(text) {
-  const res = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/push', {
-    method: 'post',
-    contentType: 'application/json',
-    muteHttpExceptions: true,
-    headers: { Authorization: 'Bearer ' + CONFIG.LINE_TOKEN },
-    payload: JSON.stringify({ to: CONFIG.LINE_USER_ID, messages: [{ type: 'text', text: text }] }),
-  });
-  if (res.getResponseCode() !== 200) console.error('LINE送信失敗: ' + res.getContentText());
-}
-
-// エラーは状態が変わるまで1回だけ通知（無料枠200通/月を守る）
-function notifyErrorOnce_(msg) {
-  const props = PropertiesService.getScriptProperties();
-  console.error(msg);
-  if (props.getProperty('lastError')) return;
-  props.setProperty('lastError', msg);
-  pushLine_('⚠️ リセール監視エラー: ' + msg);
-}
-
-function setupTrigger() {
-  stopTrigger();
-  ScriptApp.newTrigger('check').timeBased().everyMinutes(5).create();
-}
-function stopTrigger() {
-  ScriptApp.getProjectTriggers().forEach(t => ScriptApp.deleteTrigger(t));
-}
-function testNotify() {
-  pushLine_('テスト通知：BMSG FESリセール監視の設定OK');
-}
-/** 通知せずに、今の出品一覧をログに出す（動作確認用） */
-function testCheck() {
-  const items = fetchItems_();
-  console.log(`取得 ${items.length}件`);
-  items.forEach(it => console.log(JSON.stringify(it)));
-}
-/** 通知済み記録をリセット */
-function resetNotified() {
-  PropertiesService.getScriptProperties().deleteProperty('notified');
-}
+      - name: 通知済みの記録を保存
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: state-${{ github.run_id }}-${{ github.run_attempt }}
