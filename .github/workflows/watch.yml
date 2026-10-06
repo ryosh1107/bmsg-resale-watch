@@ -12,7 +12,7 @@ on:
 
 # 同時に2つ動かさない（実行中に次の起動が来たら、終わるまで待機）
 concurrency:
-  group: resale-watch
+  group: resale-watch-${{ (github.event_name == 'workflow_dispatch' && inputs.test) && 'test' || 'loop' }}
   cancel-in-progress: false
 
 jobs:
@@ -43,9 +43,11 @@ jobs:
         env:
           LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
           TEST_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.test }}
-          INTERVAL_SEC: '20'     # チェック間隔（秒）
+          INTERVAL_SEC: '10'     # チェック間隔（秒）
           LOOP_MINUTES: '330'    # 1回の実行で動き続ける時間（分）
           SEARCH_EVENT: ''
+          WANT_DATE: '2026/10/12'   # 通知する日付（空にすると全日程）
+          WANT_COUNT: '2'           # 通知する枚数（0にすると枚数を問わない）
           NOTIFY_PURCHASING: 'false'
 
       - name: 通知済みの記録を保存
