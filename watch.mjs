@@ -9,12 +9,18 @@ const CFG = {
   event: process.env.SEARCH_EVENT || '', // 日程を絞る場合: 1003610=10/10, 1003611=10/11, 1003612=10/12
   titleMust: 'BMSG FES',
   notifyPurchasing: process.env.NOTIFY_PURCHASING === 'true',
+  wantDate: process.env.WANT_DATE || '',             // 通知する日付（例 2026/10/12）。空なら全日程
+  wantCount: Number(process.env.WANT_COUNT || 0),    // 通知する枚数（例 2）。0なら枚数を問わない
 };
+// 通知の条件（日付・枚数）に合う出品か
+const isWanted = i =>
+  (!CFG.wantDate || i.date.startsWith(CFG.wantDate)) &&
+  (!CFG.wantCount || i.count === CFG.wantCount);
 const TOKEN = process.env.LINE_TOKEN;
 const TEST = process.env.TEST_MODE === 'true';
-const INTERVAL_SEC = Number(process.env.INTERVAL_SEC || 20);   // チェック間隔（秒）
+const INTERVAL_SEC = Number(process.env.INTERVAL_SEC || 10);   // チェック間隔（秒）
 const LOOP_MINUTES = Number(process.env.LOOP_MINUTES || 330);  // 1回の実行で動き続ける時間（分）
-const RELOAD_EVERY_MIN = 10;                                   // ページを開き直す間隔（分）
+const RELOAD_EVERY_MIN = 4;                                    // ページを開き直す間隔（分）
 const ERROR_NOTIFY_AFTER = 3;                                  // 連続この回数失敗したらエラー通知
 const STATE = 'state/state.json';
 const LIST_URL = 'https://store.anypass.jp/resale-list';
@@ -73,6 +79,7 @@ async function searchInPage(page) {
         title: t('.title'),
         date: t('.date'),
         seat: seat ? `${seat[1]} ×${seat[2]}枚` : '',
+        count: seat ? Number(seat[2]) : 0,
         price: price ? `${price[1]}/1枚` : '',
       };
     });
@@ -98,13 +105,14 @@ async function handleResult(items) {
   const available = items.filter(i => !i.purchasing);
   stats.checks++;
   stats.maxItems = Math.max(stats.maxItems, items.length);
-  console.log(`[${now()}] 出品 ${items.length}件 / 購入可能 ${available.length}件`);
+  const wanted = available.filter(isWanted);
+  console.log(`[${now()}] 出品 ${items.length}件 / 購入可能 ${available.length}件 / うち条件に合う ${wanted.length}件`);
   items.forEach(i => console.log('   ' + JSON.stringify({ ...i, url: i.url.split('?')[0] })));
 
   // 購入手続き中になった出品は通知済み記録を消す（約15分後に再放出されたら再通知するため）
   items.filter(i => i.purchasing).forEach(i => { delete state.notified[i.id]; });
 
-  const targets = items.filter(i => (CFG.notifyPurchasing || !i.purchasing) && !state.notified[i.id]);
+  const targets = items.filter(i => isWanted(i) && (CFG.notifyPurchasing || !i.purchasing) && !state.notified[i.id]);
   if (targets.length) {
     const lines = targets.slice(0, 5).map(i =>
       `■ ${i.date}\n${i.seat} / ${i.price}` +
@@ -158,7 +166,7 @@ try {
       }
       consecutiveErrors = 0;
       if (TEST) {
-        await pushLine(`🧪 テスト実行OK\nBMSG FES出品 ${items.length}件（うち購入可能 ${available.length}件）\nチェック間隔 ${INTERVAL_SEC}秒`);
+        await pushLine(`🧪 テスト実行OK\nBMSG FES出品 ${items.length}件（うち購入可能 ${available.length}件）\n通知条件：${CFG.wantDate || '全日程'} / ${CFG.wantCount ? CFG.wantCount + '枚' : '枚数指定なし'}\nチェック間隔 ${INTERVAL_SEC}秒`);
       }
     } catch (e) {
       const msg = String(e && e.message || e).slice(0, 300);
