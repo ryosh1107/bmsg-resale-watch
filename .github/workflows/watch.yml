@@ -2,14 +2,15 @@ name: BMSG resale watch
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/30 * * * *'   # 予備（常駐ループが止まっていたら再開する）
   workflow_dispatch:
     inputs:
       test:
-        description: 'テスト通知を送る'
+        description: 'テスト通知を送る（1回だけチェックして終了）'
         type: boolean
         default: true
 
+# 同時に2つ動かさない（実行中に次の起動が来たら、終わるまで待機）
 concurrency:
   group: resale-watch
   cancel-in-progress: false
@@ -17,7 +18,7 @@ concurrency:
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
@@ -37,12 +38,13 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
 
-      - name: リセールをチェック
+      - name: リセールをチェック（常駐ループ）
         run: node watch.mjs
         env:
           LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
-          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           TEST_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.test }}
+          INTERVAL_SEC: '20'     # チェック間隔（秒）
+          LOOP_MINUTES: '330'    # 1回の実行で動き続ける時間（分）
           SEARCH_EVENT: ''
           NOTIFY_PURCHASING: 'false'
 
