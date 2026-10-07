@@ -43,7 +43,8 @@ jobs:
         env:
           LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
           TEST_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.test }}
-          INTERVAL_SEC: '10'     # チェック間隔（秒）
+          INTERVAL_SEC: '10'     # 更新タイミングを学習できていないときのチェック間隔（秒）
+          PERIOD_SEC: '60'       # 一覧の更新周期の初期値（秒）。動かしながら自動で補正される
           LOOP_MINUTES: '330'    # 1回の実行で動き続ける時間（分）
           SEARCH_EVENT: ''
           WANT_DATE: '2026/10/12'   # 通知する日付（空にすると全日程）
@@ -56,3 +57,12 @@ jobs:
         with:
           path: state
           key: state-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: 分析用ログを保存
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checks-${{ github.run_id }}
+          path: logs/
+          retention-days: 7
+          if-no-files-found: ignore
